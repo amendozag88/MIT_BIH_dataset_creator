@@ -1,0 +1,432 @@
+# MIT-BIH Beat Dataset Builder
+
+This script builds a beat-level ECG classification dataset from the **MIT-BIH Arrhythmia Database** using the expert beat annotations provided by PhysioNet.
+
+The builder is intended for experiments with compact ECG classifiers such as Hyperdimensional Computing (HDC), Low-Dimensional Computing (LDC), TinyML, and embedded neural networks.
+
+It supports:
+
+- automatic download of the MIT-BIH Arrhythmia Database with `wfdb`
+- use of expert `atr` beat annotations as R-peak locations
+- resampling from the native MIT-BIH sampling rate to a configurable target sampling frequency
+- extraction of fixed-length ECG windows centered on annotated beats
+- MLII channel selection
+- AAMI beat-class mapping
+- optional exclusion of paced-beat records
+- random beat-wise splitting
+- strict patient-independent splitting
+- canonical de Chazal DS1/DS2 splitting
+- optional signal normalization
+- saving patient/record metadata for later split and prototype analyses
+- generation of NumPy arrays directly compatible with downstream model training scripts
+
+---
+
+## Dataset
+
+The builder uses the **MIT-BIH Arrhythmia Database** from PhysioNet.
+
+The database contains:
+
+- 48 ECG records
+- two ECG channels per record
+- expert beat annotations
+- native sampling frequency of 360 Hz
+- approximately 30 minutes of ECG per record
+
+The script uses the expert annotation files (`.atr`) rather than applying a separate R-peak detector. This avoids introducing R-peak detection errors into the classification benchmark.
+
+---
+
+## Output Dataset
+
+The primary outputs are six NumPy arrays:
+
+X_train.npy
+X_val.npy
+X_test.npy
+
+y_train.npy
+y_val.npy
+y_test.npy
+
+---
+## ECG arrays
+
+The ECG arrays have shape:
+(number_of_beats, number_of_samples)
+
+For the default configuration:
+(number_of_beats, 187)
+
+The labels are integer encoded using the AAMI mapping described below.
+---
+## Default Configuration
+
+The default builder configuration is intended for lightweight ECG classification experiments:
+TARGET_FS = 250N_SAMPLES = 187CHANNEL_MODE = "MLII"NORMALIZATION = "none"SPLIT_MODE = "random"EXCLUDE_PACED_RECORDS = TrueTRAIN_FRAC = 0.70VAL_FRAC = 0.15TEST_FRAC = 0.15RANDOM_SEED = 42
+
+
+Therefore, by default:
+1. MIT-BIH ECGs are resampled from 360 Hz to 250 Hz.
+2. The MLII channel is used when available.
+3. Each ECG beat contains 187 samples centered on the expert annotation.
+4. Paced-beat records are excluded.
+5. Beats are divided using a stratified 70/15/15 random beat-wise split.
+6. No explicit waveform normalization is applied by the dataset builder.
+Sampling Frequency
+MIT-BIH is originally sampled at:
+360 Hz
+
+The default target rate is:
+250 Hz
+
+Resampling is performed using polyphase filtering with:
+scipy.signal.resample_poly
+
+
+For the standard MIT-BIH case:
+360 Hz -> 250 Hz
+
+which corresponds to the rational resampling ratio:
+25 / 36
+
+The target sampling rate can be changed using:
+TARGET_FS = 250
+
+---
+## Beat Extraction
+
+Beats are centered around the expert annotation sample provided in the MIT-BIH .atr files.
+After resampling, the annotation location is transformed according to:
+new_sample =
+round(original_sample * target_fs / source_fs)
+
+The default beat length is:
+N_SAMPLES = 187
+
+
+Because 187 is odd, the resulting beat contains:
+93 samples before the R peak
+1 R-peak sample
+93 samples after the R peak
+
+At 250 Hz, this corresponds to approximately:
+187 / 250 = 0.748 seconds
+
+of ECG context.
+The number of samples can be modified independently of the sampling frequency.
+For example:
+N_SAMPLES = 61
+
+
+can be used for a shorter, primarily QRS-focused representation.
+
+---
+## ECG Channel Selection
+
+
+Two channel-selection modes are supported.
+MLII mode
+CHANNEL_MODE = "MLII"
+
+
+The script searches the WFDB signal names and explicitly selects the channel named:
+MLII
+
+This avoids assuming that MLII is always channel 0.
+For example, some MIT-BIH records contain MLII as the second channel.
+If a record does not contain MLII, it is skipped.
+The skipped records are recorded in:
+skipped_records.csv
+
+First-channel mode
+For experiments intended to reproduce preprocessing pipelines that simply use the first MIT-BIH channel:
+CHANNEL_MODE = "first"
+
+
+the builder selects:
+record.p_signal[:, 0]
+
+
+regardless of the channel name.
+Paced-Beat Record Exclusion
+MIT-BIH records:
+102
+104
+107
+217
+
+contain paced beats and are frequently excluded in AAMI-style heartbeat-classification studies.
+The builder supports this convention with:
+EXCLUDE_PACED_RECORDS = True
+
+
+and:
+PACED_RECORDS = {    "102",    "104",    "107",    "217",}
+
+
+When enabled, these records are removed before beat extraction.
+To retain them:
+EXCLUDE_PACED_RECORDS = False
+
+
+Note that when:
+CHANNEL_MODE = "MLII"
+
+
+records 102 and 104 would already be unavailable because they do not contain an MLII channel. The explicit paced-record option is nevertheless retained so that the preprocessing protocol is documented consistently across channel-selection modes.
+AAMI Beat Mapping
+MIT-BIH beat annotation symbols are mapped into the five commonly used AAMI heartbeat groups:
+N - Normal
+S - Supraventricular ectopic
+V - Ventricular ectopic
+F - Fusion
+Q - Unknown / paced
+
+The mapping used by the builder is:
+AAMI_MAP = {    # N: Normal / bundle branch / escape    "N": "N",    "L": "N",    "R": "N",    "e": "N",    "j": "N",    # S: Supraventricular ectopic    "A": "S",    "a": "S",    "J": "S",    "S": "S",    # V: Ventricular ectopic    "V": "V",    "E": "V",    # F: Fusion    "F": "F",    # Q: Unknown / paced    "/": "Q",    "f": "Q",    "Q": "Q",}
+
+
+Integer labels are assigned using:
+CLASS_TO_INDEX = {    "N": 0,    "S": 1,    "V": 2,    "F": 3,    "Q": 4,}
+
+
+Therefore:
+Integer	AAMI class
+0	N
+1	S
+2	V
+3	F
+4	Q
+
+
+The mapping is also saved as:
+class_mapping.json
+
+---
+## Normalization
+The following options are available:
+NORMALIZATION = "none"NORMALIZATION = "per_beat_zscore"NORMALIZATION = "global_zscore"
+
+
+No normalization
+Default:
+NORMALIZATION = "none"
+
+
+The extracted ECG amplitudes are stored directly after resampling.
+This is recommended when normalization or quantization will be performed later by the model pipeline.
+For example, the LDC training pipeline can estimate its 8-bit quantization range from the training set only:
+quantizer.fit(X_train)X_train_q = quantizer.transform(X_train)X_val_q = quantizer.transform(X_val)X_test_q = quantizer.transform(X_test)
+
+
+This avoids using validation or test information to define the quantization range.
+Per-beat z-score
+NORMALIZATION = "per_beat_zscore"
+
+
+Each beat is normalized independently:
+x_norm = (x - mean(x)) / std(x)
+
+This removes beat-specific amplitude offset and scaling information.
+Global z-score
+NORMALIZATION = "global_zscore"
+
+
+The mean and standard deviation are calculated using the training set only:
+mean_train
+std_train
+
+and subsequently applied to training, validation, and test data.
+The normalization parameters are saved in:
+normalization.json
+
+
+---
+## Dataset Splitting
+
+Three split modes are supported.
+1. Random Beat-Wise Split
+Default:
+SPLIT_MODE = "random"
+
+
+The beats are divided using a stratified random split:
+70% training
+15% validation
+15% test
+
+The label distribution is preserved approximately across the three sets.
+Because the split occurs at the beat level, beats from the same patient or record can appear in training, validation, and test sets.
+This configuration is useful for direct comparison with studies that use conventional random beat-wise MIT-BIH splits.
+2. Strict Patient-Independent Split
+SPLIT_MODE = "inter_patient"
+
+
+This mode guarantees that a patient appearing in one partition does not appear in another.
+The split is performed with:
+sklearn.model_selection.GroupShuffleSplit
+
+
+using:
+patient_id
+
+as the grouping variable.
+MIT-BIH contains 48 records from 47 subjects. Records:
+201
+202
+
+belong to the same subject.
+The builder therefore maps both records to:
+patient_201_202
+
+before performing a strict patient-independent split.
+After creating the split, the builder verifies that:
+train ∩ validation = empty
+train ∩ test       = empty
+validation ∩ test  = empty
+
+with respect to patient IDs.
+3. Canonical de Chazal DS1/DS2 Split
+SPLIT_MODE = "dechazal"
+
+
+The script also implements the commonly used MIT-BIH DS1/DS2 protocol.
+DS1
+101 106 108 109 112 114 115 116
+118 119 122 124 201 203 205 207
+208 209 215 220 223 230
+
+DS2
+100 103 105 111 113 117 121 123
+200 202 210 212 213 214 219 221
+222 228 231 232 233 234
+
+DS1 is used for model development and DS2 is used as the test set.
+Because the canonical protocol does not provide a dedicated validation set, the builder reserves a subset of the DS1 records for validation.
+Important note
+The historical DS1/DS2 protocol places:
+201
+
+and:
+202
+
+in opposite partitions even though the two records belong to the same subject.
+Therefore:
+SPLIT_MODE = "dechazal"
+
+should be considered the canonical inter-record benchmark, while:
+SPLIT_MODE = "inter_patient"
+
+provides the stricter subject-independent evaluation.
+
+
+---
+## Metadata
+
+The builder stores metadata for every extracted beat.
+Fields include:
+beat_id
+record_id
+patient_id
+annotation_index
+original_symbol
+aami_class
+label
+source_fs
+target_fs
+original_rpeak_sample
+resampled_rpeak_sample
+channel_name
+channel_index
+
+This metadata enables later analyses such as:
+- patient-independent evaluation
+- record-independent evaluation
+- prototype composition analysis
+- determining whether discovered HDC/LDC prototypes correspond to specific patients
+- determining whether prototypes correspond to original MIT-BIH beat subtypes
+- reproducing alternative train/validation/test splits without rebuilding the raw waveform dataset
+Metadata files include:
+metadata_train.csv
+metadata_val.csv
+metadata_test.csv
+metadata_all_splits.csv
+
+If the full dataset is saved:
+metadata_all.csv
+
+is also produced.
+Full Dataset Storage
+By default:
+SAVE_FULL_DATASET = True
+
+
+The script additionally saves:
+X_all.npy
+y_all.npy
+metadata_all.csv
+
+before train/validation/test splitting.
+The exact split indices are stored in:
+split_indices.npz
+
+containing:
+train_idx
+val_idx
+test_idx
+
+This makes it possible to generate alternative split protocols later without repeating:
+- WFDB loading
+- annotation parsing
+- resampling
+- beat extraction
+Output Directory
+A typical output directory contains:
+processed_250Hz_187/
+│
+├── X_train.npy
+├── X_val.npy
+├── X_test.npy
+│
+├── y_train.npy
+├── y_val.npy
+├── y_test.npy
+│
+├── X_all.npy
+├── y_all.npy
+│
+├── metadata_train.csv
+├── metadata_val.csv
+├── metadata_test.csv
+├── metadata_all.csv
+├── metadata_all_splits.csv
+│
+├── split_indices.npz
+├── class_mapping.json
+├── normalization.json
+├── dataset_config.json
+└── skipped_records.csv
+
+## Installation
+Install the required packages with:
+pip install wfdb scipy scikit-learn pandas numpy
+
+## Usage
+Edit the configuration variables near the beginning of the script:
+DATASET_DIR = Path(r"C:\repos\datasets\MIT-BIH")
+OUTPUT_DIR = DATASET_DIR / "processed_250Hz_187"
+TARGET_FS = 250
+N_SAMPLES = 187
+CHANNEL_MODE = "MLII"
+NORMALIZATION = "none"
+SPLIT_MODE = "random"
+EXCLUDE_PACED_RECORDS = True
+TRAIN_FRAC = 0.70
+VAL_FRAC = 0.15
+TEST_FRAC = 0.15
+RANDOM_SEED = 14
+
+Then run. If the database is not present and:
+DOWNLOAD_DATABASE = True
